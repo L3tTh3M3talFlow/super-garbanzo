@@ -1,0 +1,117 @@
+parameters:
+  - name: projects
+    type: string
+    default: ""
+  - name: isFunctionApp
+    type: boolean
+    default: false
+  - name: testMode
+    type: boolean
+    default: false
+  - name: solutionFolder
+    type: string
+    default: ""
+  - name: SonarCloudOrg
+    type: string
+    default: "<Your SonarCloud org name here>"
+
+stages:
+  - stage: Compile
+    displayName: "Create artifacts"
+    variables:
+      BuildConfiguration: Release
+    jobs:
+      - job: Compile
+        variables:
+          - name: branchCondition # Runs step only when build reason is not pull request
+            value: |
+              or(
+                and(
+                  succeeded(),
+                  ne(variables['Build.Reason'], 'PullRequest'),
+                  eq(variables['Build.SourceBranch'], 'refs/heads/main')
+                ),
+                and(
+                  succeeded(),
+                  ne(variables['Build.Reason'], 'PullRequest'),
+                  eq(variables['Build.SourceBranch'], 'refs/heads/release/')
+                ),
+                and(
+                  succeeded(),
+                  ${{ parameters.testMode }},
+                  startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')
+                )
+              )
+        ${{ if parameters.isFunctionApp }}:
+          pool:
+            vmImage: windows-latest
+        steps:
+          - task: DotNetCoreCLI@2
+            displayName: Restore '$(System.TeamProject)-$(Build.Repository.Name)'
+            condition: not(${{ parameters.isFunctionApp }})
+            retryCountOnTaskFailure: 1
+            inputs:
+              command: restore
+              projects: ${{ parameters.projects }}
+              feedsToUse: "config"
+              nugetConfigPath: "nuget.config"
+
+          - task: SonarCloudPrepare@1
+            displayName: Prepare analysis on SonarCloud
+            condition: ${{ variables.branchCondition }}
+            retryCountOnTaskFailure: 1
+            continueOnError: true
+            inputs:
+              SonarCloud: "<Your SonarCloud key here>"
+              scannerMode: "MSBuild"
+              organization: ${{ parameters.SonarCloudOrg }}
+              projectKey: "$(System.TeamProject)-$(Build.Repository.Name)"
+              projectName: "$(System.TeamProject)-$(Build.Repository.Name)"
+              projectVersion: "$(Build.BuildNumber)"
+
+          - task: DotNetCoreCLI@2
+            displayName: Build $(System.TeamProject)-$(Build.Repository.Name)
+            inputs:
+              command: build
+              projects: ${{ parameters.projects }}
+              arguments: --configuration $(BuildConfiguration)
+
+          - task: DotNetCoreCLI@2
+            condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+            displayName: "Unit Test"
+            inputs:
+              command: "test"
+              projects: ${{ parameters.projects }}
+              arguments: '--collect "Code coverage"'
+              testRunTitle: "UnitTests"
+
+          - task: DotNetCoreCLI@2
+            displayName: Publish $(System.TeamProject)-$(Build.Repository.Name)
+            inputs:
+              command: publish
+              publishWebProjects: false
+              projects: ${{ parameters.projects }}
+              arguments: "--configuration $(BuildConfiguration) --output $(Build.ArtifactStagingDirectory)"
+              zipAfterPublish: true
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish Pipeline Artifact
+            condition: ${{ variables.branchCondition }}
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)
+              artifactName: "$(System.TeamProject)-$(Build.Repository.Name)"
+              publishLocation: "pipeline"
+
+          - task: SonarCloudAnalyze@1
+            displayName: Run Code Analysis
+            condition: ${{ variables.branchCondition }}
+            retryCountOnTaskFailure: 1
+            continueOnError: true
+
+          - task: SonarCloudPublish@1
+            displayName: Publish Quality Gate Result
+            condition: ${{ variables.branchCondition }}
+            retryCountOnTaskFailure: 1
+            continueOnError: true
+            inputs:
+              pollingTimeOutSec: "300"

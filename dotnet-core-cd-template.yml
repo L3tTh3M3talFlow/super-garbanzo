@@ -1,0 +1,65 @@
+parameters:
+  - name: environments
+    type: object
+    default:
+      name: ""
+      dependsOn: ""
+      variablesGroup: ""
+      resourceGroup: ""
+      jobsEnvironmentName: ""
+      connectedServiceName: ""
+      webAppName: ""
+      slot: ""
+      virtualPath: ""
+  - name: validBranches
+    type: object
+    default:
+      - development
+      - main
+      - release-*
+  - name: hasJSONFiles
+    type: boolean
+    default: false
+
+stages:
+  - ${{ each client in parameters.environments }}:
+      - stage: Deploy
+        displayName: "Deploying ${{ client.name }}"
+        # Run step only when build reason is not pull request and only from main branch
+        condition: |
+          and(
+            succeeded(),
+              ne(variables['Build.Reason'], 'PullRequest'),
+              eq(variables['Build.SourceBranch'], 'refs/heads/main')
+            )
+        dependsOn: ${{ client.dependsOn }}
+        jobs:
+          - deployment: Deploy
+            environment: ${{ client.jobsEnvironmentName }}
+            variables:
+              - ${{ if client.variablesGroup }}:
+                  - group: ${{ client.variablesGroup }}
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - download: current
+                      artifact: "$(System.TeamProject)-$(Build.Repository.Name)"
+
+                    - task: "AzureRmWebAppDeployment@4"
+                      displayName: Deploy Package to Azure App Service
+                      retryCountOnTaskFailure: 1
+                      inputs:
+                        ConnectionType: "AzureRM"
+                        ConnectedServiceName: ${{ client.connectedServiceName }}
+                        appType: "webApp"
+                        WebAppName: ${{ client.webAppName }}
+                        ResourceGroupName: ${{ client.resourceGroup }}
+                        ${{ if client.slot }}:
+                          deployToSlotOrASE: true
+                          SlotName: ${{ client.slot }}
+                        VirtualApplication: ${{ client.virtualPath }}
+                        packageForLinux: "$(Pipeline.Workspace)/$(System.TeamProject)-$(Build.Repository.Name)/**/*.zip"
+                        ${{ if parameters.hasJSONFiles }}:
+                          JSONFiles: "**/appsettings.json" # Token replacement for JSON files if present.
+                        enableXmlVariableSubstitution: true
